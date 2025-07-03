@@ -1,22 +1,24 @@
 const express = require('express');
-const cors = require('cors');
-const { createProxyMiddleware } = require('http-proxy-middleware');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for all routes
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: ['*'],
-  credentials: false
-}));
+// Middleware to parse raw body for POST requests
+app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
-// Parse JSON bodies
-app.use(express.json());
+// Enable CORS for all requests
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', '*');
+  
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+  
+  next();
+});
 
-// Home route with usage instructions
+// Home route - only match exact root
 app.get('/', (req, res) => {
   res.json({
     message: 'CORS Proxy Server',
@@ -25,84 +27,104 @@ app.get('/', (req, res) => {
       examples: [
         `${req.protocol}://${req.get('host')}/https://api.github.com/users/octocat`,
         `${req.protocol}://${req.get('host')}/https://httpbin.org/json`,
-        `${req.protocol}://${req.get('host')}/https://jsonplaceholder.typicode.com/posts/1`
+        `${req.protocol}://${req.get('host')}/https://example.com/file.mp3`
       ],
-      methods: 'Supports GET, POST, PUT, DELETE, PATCH',
-      cors: 'CORS headers automatically added to all responses'
+      note: 'This proxy adds CORS headers to any request'
     }
   });
 });
 
-// Proxy route - handles all HTTP methods
-app.use('/*', async (req, res) => {
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Proxy everything else - use a wildcard that captures everything
+app.all('*', async (req, res) => {
   try {
-    // Get the full URL from the path (everything after the first slash)
-    const fullPath = req.url.slice(1); // Remove leading slash
+    // Get the target URL from the request path
+    let targetUrl = req.originalUrl || req.url;
+    
+    // Remove the leading slash
+    if (targetUrl.startsWith('/')) {
+      targetUrl = targetUrl.slice(1);
+    }
+    
+    console.log('Request URL:', req.url);
+    console.log('Original URL:', req.originalUrl);
+    console.log('Target URL:', targetUrl);
     
     // Validate URL
-    if (!fullPath.startsWith('http://') && !fullPath.startsWith('https://')) {
+    if (!targetUrl || !targetUrl.startsWith('http')) {
       return res.status(400).json({
         error: 'Invalid URL',
         message: 'URL must start with http:// or https://',
         example: `${req.protocol}://${req.get('host')}/https://api.example.com`,
-        received: fullPath
+        received: targetUrl,
+        debug: {
+          url: req.url,
+          originalUrl: req.originalUrl,
+          method: req.method
+        }
       });
     }
 
-    console.log('Proxying request to:', fullPath);
+    // Prepare headers for the target request
+    const targetHeaders = { ...req.headers };
     
-    // For audio files and other binary content, we need to handle this differently
-    // than using http-proxy-middleware which can corrupt binary data
+    // Update the Host header to match the target domain
+    try {
+      const targetURL = new URL(targetUrl);
+      targetHeaders.host = targetURL.host;
+      targetHeaders.origin = `${targetURL.protocol}//${targetURL.host}`;
+    } catch (err) {
+      console.error('URL parsing error:', err);
+      return res.status(400).json({
+        error: 'Invalid URL format',
+        message: 'Could not parse the provided URL',
+        url: targetUrl
+      });
+    }
     
-    const targetUrl = new URL(fullPath);
-    
-    // Create headers for the upstream request
-    const upstreamHeaders = {
-      ...req.headers,
-      host: targetUrl.host,
-      // Remove headers that might cause issues
-      'x-forwarded-for': undefined,
-      'x-forwarded-proto': undefined,
-      'x-forwarded-host': undefined,
-      'x-real-ip': undefined,
-      'cf-connecting-ip': undefined,
-      'cf-ray': undefined,
-      'cf-visitor': undefined,
-      'cf-ipcountry': undefined,
-    };
-    
-    // Clean up undefined headers
-    Object.keys(upstreamHeaders).forEach(key => {
-      if (upstreamHeaders[key] === undefined) {
-        delete upstreamHeaders[key];
-      }
-    });
+    // Remove problematic headers
+    delete targetHeaders['x-forwarded-for'];
+    delete targetHeaders['x-forwarded-proto'];
+    delete targetHeaders['x-forwarded-host'];
+    delete targetHeaders['x-real-ip'];
+    delete targetHeaders['cf-connecting-ip'];
+    delete targetHeaders['cf-ray'];
+    delete targetHeaders['cf-visitor'];
+    delete targetHeaders['cf-ipcountry'];
 
+    console.log('Making request to:', targetUrl);
+    
     // Make the request to the target URL
-    const response = await fetch(fullPath, {
+    const response = await fetch(targetUrl, {
       method: req.method,
-      headers: upstreamHeaders,
+      headers: targetHeaders,
       body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
       redirect: 'follow'
     });
 
-    // Set CORS headers
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-    res.header('Access-Control-Allow-Headers', '*');
+    console.log('Response status:', response.status);
+    console.log('Response headers:', Object.fromEntries(response.headers));
+
+    // Set response status
+    res.status(response.status);
     
-    // Copy response headers from upstream
-    response.headers.forEach((value, key) => {
-      // Skip headers that might cause issues
-      if (!['content-encoding', 'transfer-encoding', 'connection', 'keep-alive'].includes(key.toLowerCase())) {
+    // Copy response headers (except problematic ones)
+    for (const [key, value] of response.headers) {
+      const lowerKey = key.toLowerCase();
+      if (!['content-encoding', 'transfer-encoding', 'connection', 'keep-alive'].includes(lowerKey)) {
         res.header(key, value);
       }
-    });
+    }
 
-    // Set the response status
-    res.status(response.status);
-
-    // For binary content (like audio files), we need to handle the response as a stream
+    // Handle the response body
     if (response.body) {
       const reader = response.body.getReader();
       
@@ -114,39 +136,30 @@ app.use('/*', async (req, res) => {
             res.write(Buffer.from(value));
           }
           res.end();
-        } catch (error) {
-          console.error('Stream error:', error);
+        } catch (streamError) {
+          console.error('Stream error:', streamError);
           if (!res.headersSent) {
-            res.status(500).json({ error: 'Stream error', message: error.message });
+            res.status(500).json({ error: 'Stream error', message: streamError.message });
           }
         }
       };
       
-      pump();
+      await pump();
     } else {
       res.end();
     }
     
   } catch (error) {
-    console.error('Request error:', error);
+    console.error('Proxy error:', error);
     
     if (!res.headersSent) {
       res.status(500).json({
         error: 'Proxy Error',
         message: error.message,
-        url: req.url
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
   }
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
 });
 
 // Start server
