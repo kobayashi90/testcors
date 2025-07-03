@@ -1,0 +1,29 @@
+{
+  "name": "cors-proxy-railway",
+  "version": "1.0.0",
+  "description": "CORS proxy server for Railway deployment",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "http-proxy-middleware": "^2.0.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "cors",
+    "proxy",
+    "railway",
+    "express"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
